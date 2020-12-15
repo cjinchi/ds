@@ -399,7 +399,7 @@ func (rf *Raft) sendRequestVoteToAll() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			target := i
-			go func() {
+			go func() { 
 				DPrintf("server %d send RV to server %d", rf.me, target)
 				var reply = RequestVoteReply{}
 				rf.sendRequestVote(target, args, &reply)
