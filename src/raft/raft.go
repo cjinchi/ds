@@ -17,13 +17,22 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
 import "labrpc"
+
+// definition of roleState
+const (
+	FOLLOWER  = iota
+	CANDIDATE = iota
+	LEADER    = iota
+)
 
 // import "bytes"
 // import "encoding/gob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,6 +59,21 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	currentTerm int
+	// -1 is null
+	votedFor int
+	log      []LogEntry
+
+	timer     *time.Timer
+	roleState int
+	votes     int
+
+	killed bool
+}
+
+type LogEntry struct {
+	term    int
+	command interface{}
 }
 
 // return currentTerm and whether this server
@@ -57,9 +81,11 @@ type Raft struct {
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
-	var isleader bool
+	var isLeader bool
 	// Your code here.
-	return term, isleader
+	term = rf.currentTerm
+	isLeader = rf.roleState == LEADER
+	return term, isLeader
 }
 
 //
@@ -90,14 +116,15 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.yyy)
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
 	// Your data here.
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -105,13 +132,40 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+	Term        int
+	VoteGranted bool
 }
 
-//
-// example RequestVote RPC handler.
-//
-func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	//PrevLogIndex int
+	//PreLogTerm   int
+	//Entries      []LogEntry
+	//LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+// last paragraph of section 5.4.1
+func logEntryCompare(aTerm int, aIndex int, bTerm int, bIndex int) int {
+	if aTerm < bTerm {
+		return -1
+	} else if aTerm > bTerm {
+		return 1
+	} else {
+		// aTerm == bTerm here
+		if aIndex < bIndex {
+			return -1
+		} else if aIndex > bIndex {
+			return 1
+		} else {
+			return 0
+		}
+	}
 }
 
 //
@@ -136,6 +190,71 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+//
+// example RequestVote RPC handler.
+//
+func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+	// Your code here.
+	DPrintf("server %d get RV from server %d, my term is %d and your term is %d", rf.me, args.CandidateId,rf.currentTerm,args.Term)
+	reply.Term = rf.currentTerm
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.changeRoleState(FOLLOWER)
+		rf.votedFor = -1
+		DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
+	}
+
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (len(rf.log) == 0 || logEntryCompare(rf.log[len(rf.log)-1].term, len(rf.log), args.LastLogTerm, args.LastLogIndex) <= 0) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.resetTimer()
+	} else {
+		reply.VoteGranted = false
+	}
+
+
+
+	if reply.VoteGranted {
+		DPrintf("server %d GRANT vote to %d", rf.me, args.CandidateId)
+	} else {
+		DPrintf("server %d NOT GRANT vote to %d", rf.me, args.CandidateId)
+	}
+
+}
+
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	DPrintf("server %d get AE from server %d", rf.me, args.LeaderId)
+	reply.Term = rf.currentTerm
+	DPrintf("in ae, args.term is %d, me.term is %d",args.Term,rf.currentTerm)
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.changeRoleState(FOLLOWER)
+		DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
+	}
+
+	//TODO: set true directly for heartbeat only
+	if args.Term >= rf.currentTerm {
+		reply.Success = true
+		rf.resetTimer()
+	}
+
+
+
+	//if args.Term<rf.currentTerm{
+	//	reply.Success = false
+	//}else if args.PrevLogIndex>=len(rf.log) || rf.log[args.PrevLogIndex].term!=args.PreLogTerm{
+	//	reply.Success = false
+	//}
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -155,6 +274,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
+	//fmt.Println("in Start()")
 
 	return index, term, isLeader
 }
@@ -167,6 +287,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.killed = true
 }
 
 //
@@ -187,11 +308,146 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.roleState = FOLLOWER
+	rf.votes = 0
+
+	rf.killed = false
+
 	// Your initialization code here.
+	//fmt.Println("in Make()")
+	go rf.timerMonitor()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
+}
+
+func (rf *Raft) resetTimer() {
+	duration := time.Duration(300+rand.Intn(300)) * time.Millisecond
+	DPrintf("timer for %d is %d", rf.me, duration.Milliseconds())
+
+	if rf.timer == nil {
+		DPrintf("timer is null, call NewTimer")
+		rf.timer = time.NewTimer(duration)
+	} else {
+		DPrintf("reuse timer, call Reset")
+		rf.timer.Reset(duration)
+	}
+}
+
+func (rf *Raft) timerMonitor() {
+	// init timer
+	rf.resetTimer()
+	for !rf.killed{
+		select {
+		case <-rf.timer.C:
+			if !rf.killed && rf.roleState != LEADER {
+				DPrintf("server %d timeout", rf.me)
+				rf.changeRoleState(CANDIDATE)
+			}
+
+		}
+	}
+}
+
+func (rf *Raft) changeRoleState(newRoleState int) {
+	if newRoleState == FOLLOWER {
+		rf.roleState = FOLLOWER
+	} else if newRoleState == CANDIDATE {
+		rf.roleState = CANDIDATE
+		rf.startElection()
+	} else if newRoleState == LEADER {
+		rf.roleState = LEADER
+		go func() {
+			for !rf.killed && rf.roleState == LEADER {
+				rf.sendAppendEntriesToAll()
+				time.Sleep(100 * time.Millisecond)
+			}
+			DPrintf("server %d stop send AE to all",rf.me)
+		}()
+	}
+
+}
+
+func (rf *Raft) startElection() {
+	DPrintf("server %d startElection", rf.me)
+	rf.currentTerm++
+	DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
+	rf.votedFor = rf.me
+	rf.votes = 1
+	go rf.resetTimer()
+	go rf.sendRequestVoteToAll()
+}
+
+func (rf *Raft) sendRequestVoteToAll() {
+	DPrintf("server %d start sending RV to all", rf.me)
+	var args = RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	if len(rf.log) == 0 {
+		args.LastLogIndex = 0
+		args.LastLogTerm = 0
+	} else {
+		args.LastLogIndex = len(rf.log)
+		args.LastLogTerm = rf.log[len(rf.log)-1].term
+	}
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			target := i
+			go func() {
+				DPrintf("server %d send RV to server %d", rf.me, target)
+				var reply = RequestVoteReply{}
+				rf.sendRequestVote(target, args, &reply)
+				if rf.currentTerm == args.Term && reply.VoteGranted {
+					rf.votes++
+					if rf.votes >= len(rf.peers)/2+1 && rf.roleState == CANDIDATE {
+						DPrintf("server %d becomes LEADER", rf.me)
+						rf.changeRoleState(LEADER)
+					}
+				}
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.changeRoleState(FOLLOWER)
+					DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
+				}
+
+			}()
+
+		}
+	}
+}
+
+func (rf *Raft) sendAppendEntriesToAll() {
+	DPrintf("server %d start sending AE to all, its term is %d, its role is %d", rf.me,rf.currentTerm,rf.roleState)
+	var args = AppendEntriesArgs{
+		Term:     rf.currentTerm,
+		LeaderId: rf.me,
+		//TODO
+		//PrevLogIndex: 0,
+		//PreLogTerm:   0,
+		//Entries:      nil,
+		//LeaderCommit: 0,
+	}
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			target := i
+			go func() {
+				var reply = AppendEntriesReply{}
+				rf.sendAppendEntries(target, args, &reply)
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.changeRoleState(FOLLOWER)
+					DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
+				}
+			}()
+
+		}
+	}
+
 }
