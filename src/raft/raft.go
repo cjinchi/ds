@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"math/rand"
 	"sync"
 	"time"
@@ -39,7 +41,6 @@ const (
 
 // import "bytes"
 // import "encoding/gob"
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -82,7 +83,6 @@ type Raft struct {
 	votes     int
 	killed    bool
 	applyCh   chan ApplyMsg
-
 }
 
 type LogEntry struct {
@@ -180,7 +180,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	FInstrument(rf.me,true,"Start")
+	FInstrument(rf.me, true, "Start")
 	//rf.mu.Lock()
 	index := -1
 	term := -1
@@ -203,18 +203,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, entry)
 		index = len(rf.log)
 		rf.mu.Unlock()
+		rf.persist()
 		term = rf.currentTerm
 	}
 	//rf.mu.Unlock()
 
-	FInstrument(rf.me,false,"Start")
+	FInstrument(rf.me, false, "Start")
 	return index, term, isLeader
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	FInstrument(rf.me,true,"GetState")
+	FInstrument(rf.me, true, "GetState")
 	//rf.mu.Lock()
 	var term int
 	var isLeader bool
@@ -222,10 +223,9 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isLeader = rf.roleState == Leader
 	//rf.mu.Unlock()
-	FInstrument(rf.me,false,"GetState")
+	FInstrument(rf.me, false, "GetState")
 	return term, isLeader
 }
-
 
 //
 // save Raft's persistent state to stable storage,
@@ -233,7 +233,7 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	FInstrument(rf.me,true,"persist")
+	FInstrument(rf.me, true, "persist")
 	// Your code here.
 	// Example:
 	// w := new(bytes.Buffer)
@@ -242,24 +242,38 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	FInstrument(rf.me,false,"persist")
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	rf.mu.Lock()
+	e.Encode(rf.log)
+	rf.mu.Unlock()
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+
+	FInstrument(rf.me, false, "persist")
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	FInstrument(rf.me,true,"readPersist")
+	FInstrument(rf.me, true, "readPersist")
 	// Your code here.
 	// Example:
 	// r := bytes.NewBuffer(data)
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
-	FInstrument(rf.me,false,"readPersist")
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
+	FInstrument(rf.me, false, "readPersist")
 }
-
-
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -279,16 +293,16 @@ func (rf *Raft) readPersist(data []byte) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
-	FInstrument(rf.me,true,"sendRequestVote")
+	FInstrument(rf.me, true, "sendRequestVote")
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	FInstrument(rf.me,false,"sendRequestVote")
+	FInstrument(rf.me, false, "sendRequestVote")
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	FInstrument(rf.me,true,"sendAppendEntries")
+	FInstrument(rf.me, true, "sendAppendEntries")
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	FInstrument(rf.me,false,"sendAppendEntries")
+	FInstrument(rf.me, false, "sendAppendEntries")
 	return ok
 }
 
@@ -296,7 +310,7 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 // RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	FInstrument(rf.me,true,"RequestVote")
+	FInstrument(rf.me, true, "RequestVote")
 
 	DPrintf("server %d get RV from server %d, my term is %d and your term is %d", rf.me, args.CandidateId, rf.currentTerm, args.Term)
 	reply.Term = rf.currentTerm
@@ -304,8 +318,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		FPrintln("cp9")
 		//rf.mu.Lock()
 		rf.currentTerm = args.Term
-		rf.changeRoleState(Follower)
 		rf.votedFor = -1
+		rf.persist()
+		rf.changeRoleState(Follower)
 		DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
 		//rf.mu.Unlock()
 		FPrintln("cp10")
@@ -318,6 +333,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (len(rf.log) == 0 || logEntryCompare(rf.log[len(rf.log)-1].Term, len(rf.log), args.LastLogTerm, args.LastLogIndex) <= 0) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		rf.resetTimer()
 	} else {
 		reply.VoteGranted = false
@@ -330,14 +346,14 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		DPrintf("server %d NOT GRANT vote to %d", rf.me, args.CandidateId)
 	}
-	FInstrument(rf.me,false,"RequestVote")
+	FInstrument(rf.me, false, "RequestVote")
 }
 
 //
 // AppendEntries RPC handler.
 //
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	FInstrument(rf.me,true,"AppendEntries")
+	FInstrument(rf.me, true, "AppendEntries")
 	//DPrintln("log of server",rf.me,"is",rf.log)
 	//rf.mu.Lock()
 	DPrintln("server", rf.me, "state:", rf.currentTerm, rf.log, rf.commitIndex, rf.votedFor)
@@ -352,6 +368,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 		rf.changeRoleState(Follower)
 		DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
 	}
@@ -372,6 +389,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
 		}
 		rf.mu.Unlock()
+		rf.persist()
 		// 5 in fig 2
 		if args.LeaderCommit > rf.commitIndex {
 			DPrintln("CHECKPOINT 10")
@@ -412,7 +430,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	//}
 
 	DPrintln("AE handler return, reply is ", *reply)
-	FInstrument(rf.me,false,"AppendEntries")
+	FInstrument(rf.me, false, "AppendEntries")
 }
 
 //
@@ -422,16 +440,16 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
-	FInstrument(rf.me,true,"Kill")
+	FInstrument(rf.me, true, "Kill")
 	// Your code here, if desired.
 	//rf.mu.Lock()
 	rf.killed = true
 	//rf.mu.Unlock()
-	FInstrument(rf.me,false,"Kill")
+	FInstrument(rf.me, false, "Kill")
 }
 
 func (rf *Raft) updateCommitIndex(newIndex int) {
-	FInstrument(rf.me,true,"updateCommitIndex")
+	FInstrument(rf.me, true, "updateCommitIndex")
 	for i := rf.commitIndex + 1; i <= newIndex; i++ {
 		rf.applyCh <- ApplyMsg{
 			Index:   i,
@@ -441,11 +459,11 @@ func (rf *Raft) updateCommitIndex(newIndex int) {
 		}
 	}
 	rf.commitIndex = newIndex
-	FInstrument(rf.me,false,"updateCommitIndex")
+	FInstrument(rf.me, false, "updateCommitIndex")
 }
 
 func (rf *Raft) resetTimer() {
-	FInstrument(rf.me,true,"resetTimer")
+	FInstrument(rf.me, true, "resetTimer")
 	duration := time.Duration(ElectionTimeoutFloor+rand.Intn(ElectionTimeoutRange)) * time.Millisecond
 	DPrintf("server %d reset timer as %d", rf.me, duration.Milliseconds())
 
@@ -456,11 +474,11 @@ func (rf *Raft) resetTimer() {
 		//DPrintf("reuse timer, call Reset")
 		rf.timer.Reset(duration)
 	}
-	FInstrument(rf.me,false,"resetTimer")
+	FInstrument(rf.me, false, "resetTimer")
 }
 
 func (rf *Raft) timerMonitor() {
-	FInstrument(rf.me,true,"timerMonitor")
+	FInstrument(rf.me, true, "timerMonitor")
 	// init timer
 	//rf.mu.Lock()
 	rf.resetTimer()
@@ -479,11 +497,11 @@ func (rf *Raft) timerMonitor() {
 			//rf.mu.Unlock()
 		}
 	}
-	FInstrument(rf.me,false,"timerMonitor")
+	FInstrument(rf.me, false, "timerMonitor")
 }
 
 func (rf *Raft) changeRoleState(newRoleState int) {
-	FInstrument(rf.me,true,"changeRoleState")
+	FInstrument(rf.me, true, "changeRoleState")
 	if newRoleState == Follower {
 		rf.roleState = Follower
 	} else if newRoleState == Candidate {
@@ -506,24 +524,25 @@ func (rf *Raft) changeRoleState(newRoleState int) {
 			DPrintf("server %d stop send AE to all", rf.me)
 		}()
 	}
-	FInstrument(rf.me,false,"changeRoleState")
+	FInstrument(rf.me, false, "changeRoleState")
 
 }
 
 func (rf *Raft) startElection() {
-	FInstrument(rf.me,true,"startElection")
+	FInstrument(rf.me, true, "startElection")
 	DPrintf("server %d startElection", rf.me)
 	rf.currentTerm++
 	DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.votes = 1
 	go rf.resetTimer()
 	go rf.sendRequestVoteToAll()
-	FInstrument(rf.me,false,"startElection")
+	FInstrument(rf.me, false, "startElection")
 }
 
 func (rf *Raft) sendRequestVoteToAll() {
-	FInstrument(rf.me,true,"sendRequestVoteToAll")
+	FInstrument(rf.me, true, "sendRequestVoteToAll")
 	DPrintf("server %d start sending RV to all", rf.me)
 	//rf.mu.Lock()
 	var args = RequestVoteArgs{
@@ -558,6 +577,7 @@ func (rf *Raft) sendRequestVoteToAll() {
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
+						rf.persist()
 						rf.changeRoleState(Follower)
 						DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
 					}
@@ -568,11 +588,11 @@ func (rf *Raft) sendRequestVoteToAll() {
 
 		}
 	}
-	FInstrument(rf.me,false,"sendRequestVoteToAll")
+	FInstrument(rf.me, false, "sendRequestVoteToAll")
 }
 
 func (rf *Raft) sendAppendEntriesToAll() {
-	FInstrument(rf.me,true,"sendAppendEntriesToAll")
+	FInstrument(rf.me, true, "sendAppendEntriesToAll")
 	DPrintf("server %d start sending heartbeat to all, its term is %d, its role is %d ", rf.me, rf.currentTerm, rf.roleState)
 	DPrintln("server", rf.me, "state:", rf.currentTerm, rf.log, rf.commitIndex, rf.votedFor)
 
@@ -610,6 +630,7 @@ func (rf *Raft) sendAppendEntriesToAll() {
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
+						rf.persist()
 						rf.changeRoleState(Follower)
 						DPrintf("---term of server %d is %d now", rf.me, rf.currentTerm)
 					}
@@ -641,7 +662,7 @@ func (rf *Raft) sendAppendEntriesToAll() {
 
 		}
 	}
-	FInstrument(rf.me,false,"sendAppendEntriesToAll")
+	FInstrument(rf.me, false, "sendAppendEntriesToAll")
 }
 
 //func (rf *Raft) sendAppendEntriesToAll(entry LogEntry) {
